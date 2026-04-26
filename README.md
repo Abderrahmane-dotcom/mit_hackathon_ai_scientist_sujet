@@ -155,7 +155,7 @@ MIT License
 
 * Abderrahmane JABIRI
 * Ismail ELADRAOUI
-* Saâd QACID
+* Saâd QACIF
 * El Yazid TEBBAA
 
 ---
