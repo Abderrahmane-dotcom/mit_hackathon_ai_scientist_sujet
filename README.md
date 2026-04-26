@@ -1,7 +1,21 @@
 
-# 🧪 AI Scientist
+<div align="center">
+  <img src="logo_axiomdesk.png" alt="AI Scientist Logo" width="140" />
+  <h1>🧪 AI Scientist</h1>
+  <p><em>Science moves at the speed of thought. Experiment planning shouldn't move at the speed of paperwork.</em></p>
+  <p><strong>AI-powered copilot for generating executable experiment plans from scientific hypotheses.</strong></p>
 
-**AI-powered copilot for generating executable experiment plans from scientific hypotheses.**
+  <p>
+    <img src="https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB" alt="React" />
+    <img src="https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
+    <img src="https://img.shields.io/badge/Vite-646CFF?style=for-the-badge&logo=vite&logoColor=white" alt="Vite" />
+    <img src="https://img.shields.io/badge/Tavily-FF6B35?style=for-the-badge&logo=searchengin&logoColor=white" alt="Tavily" />
+    <img src="https://img.shields.io/badge/Vercel-000000?style=for-the-badge&logo=vercel&logoColor=white" alt="Vercel" />
+    <img src="https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white" alt="OpenAI" />
+    <img src="https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL" />
+    <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
+  </p>
+</div>
 
 ---
 
