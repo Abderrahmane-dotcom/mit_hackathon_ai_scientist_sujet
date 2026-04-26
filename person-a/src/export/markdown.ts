@@ -1,0 +1,367 @@
+// Renders a Plan into a self-contained Markdown report.
+// Pure function — no I/O — so it can be reused by the HTTP endpoint and the CLI.
+
+import type { Plan, ProtocolStep, Reagent, BudgetLine, TimelinePhase, Citation } from "../shared/types.js";
+
+export function renderPlanMarkdown(plan: Plan): string {
+  const lines: string[] = [];
+
+  lines.push(`# Research Plan — ${plan.experiment_type}`);
+  lines.push("");
+  lines.push(`> ${plan.hypothesis}`);
+  lines.push("");
+  lines.push(
+    `**Domain:** ${plan.domain} • **Plan ID:** \`${plan.id}\` • **Created:** ${plan.created_at}`
+  );
+  lines.push("");
+
+  // Novelty
+  lines.push("## 1. Novelty Check");
+  lines.push("");
+  lines.push(`**Signal:** \`${plan.novelty.signal}\``);
+  if (plan.novelty.refs.length) {
+    lines.push("");
+    lines.push("**Prior-art references:**");
+    for (const r of plan.novelty.refs) {
+      const src = r.source ? ` *(${r.source})*` : "";
+      lines.push(`- [${r.title}](${r.url})${src}`);
+    }
+  }
+  lines.push("");
+
+  // Overview
+  lines.push("## 2. Overview");
+  lines.push("");
+  lines.push("**Primary goal.** " + clean(plan.overview.primary_goal));
+  lines.push("");
+  lines.push("**Validation approach.** " + clean(plan.overview.validation_approach));
+  lines.push("");
+  lines.push("**Success criteria:**");
+  for (const s of plan.overview.success_criteria) lines.push(`- ${clean(s)}`);
+  lines.push("");
+
+  // Protocol
+  lines.push("## 3. Protocol");
+  lines.push("");
+  for (const step of plan.protocol.steps) lines.push(...renderStep(step));
+  lines.push("");
+
+  // Materials
+  lines.push("## 4. Materials");
+  lines.push("");
+  lines.push("| # | Reagent | Supplier | Catalog | Qty | Unit $ | Total $ |");
+  lines.push("|---|---|---|---|---|---:|---:|");
+  plan.materials.items.forEach((m, i) => lines.push(renderMaterialRow(i + 1, m)));
+  lines.push("");
+  lines.push(`**Materials total:** $${fmt(plan.materials.total_usd)}`);
+  lines.push("");
+
+  // Budget
+  lines.push("## 5. Budget");
+  lines.push("");
+  lines.push("| Category | Description | Cost (USD) | Citations |");
+  lines.push("|---|---|---:|---|");
+  for (const b of plan.budget.lines) lines.push(renderBudgetRow(b));
+  lines.push(`| labor | Personnel | ${fmt(plan.budget.labor_usd)} | — |`);
+  lines.push(`| overhead | Indirect costs | ${fmt(plan.budget.overhead_usd)} | — |`);
+  lines.push(`| **total** | | **${fmt(plan.budget.total_usd)}** | |`);
+  lines.push("");
+
+  // Timeline
+  lines.push("## 6. Timeline");
+  lines.push("");
+  lines.push(
+    `**Total duration:** ${plan.timeline.weeks} weeks • ` +
+    `**Critical path:** ${plan.timeline.critical_path.join(" → ")} • ` +
+    `**Slack:** ${plan.timeline.slack_weeks} wk`
+  );
+  lines.push("");
+  lines.push("| ID | Phase | Start (wk) | Duration (wk) | Depends on |");
+  lines.push("|---|---|---:|---:|---|");
+  for (const p of plan.timeline.phases) lines.push(renderPhaseRow(p));
+  lines.push("");
+  lines.push("```mermaid");
+  lines.push("flowchart LR");
+  const cp = new Set(plan.timeline.critical_path);
+  for (const p of plan.timeline.phases) {
+    const label = `${p.id}: ${p.name.replace(/"/g, "'")}<br/>wk ${p.start_week}–${p.start_week + p.duration_weeks}`;
+    lines.push(`  ${p.id}["${label}"]`);
+  }
+  for (const p of plan.timeline.phases) {
+    for (const dep of p.depends_on) lines.push(`  ${dep} --> ${p.id}`);
+  }
+  if (cp.size > 1) {
+    lines.push(`  classDef cp fill:#fde68a,stroke:#b45309,stroke-width:2px;`);
+    lines.push(`  class ${[...cp].join(",")} cp;`);
+  }
+  lines.push("```");
+  lines.push("");
+
+  // Validation
+  lines.push("## 7. Validation");
+  lines.push("");
+  lines.push("**Metrics:**");
+  lines.push("");
+  lines.push("| Name | Threshold | Method |");
+  lines.push("|---|---|---|");
+  for (const m of plan.validation.metrics)
+    lines.push(`| ${esc(m.name)} | ${esc(m.threshold)} | ${esc(m.method)} |`);
+  lines.push("");
+  lines.push("**Controls:**");
+  for (const c of plan.validation.controls) lines.push(`- ${clean(c)}`);
+  lines.push("");
+  {
+    const stats = clean(plan.validation.statistics);
+    // If cleaned prose begins with a list/heading marker, put the label on its
+    // own line so the list renders correctly.
+    const sep = /^\s*(?:- |\*\*)/.test(stats) ? "\n\n" : " ";
+    lines.push("**Statistics.**" + sep + stats);
+  }
+  lines.push("");
+
+  // Provenance
+  lines.push("## 8. Provenance");
+  lines.push("");
+  lines.push(`Corrections applied: **${plan.provenance.corrections_applied}**`);
+  lines.push("");
+  lines.push("| Agent | Model | Latency (ms) | Tokens in/out |");
+  lines.push("|---|---|---:|---|");
+  for (const t of plan.provenance.agent_traces) {
+    const tk = t.tokens_in != null || t.tokens_out != null
+      ? `${t.tokens_in ?? "?"} / ${t.tokens_out ?? "?"}`
+      : "—";
+    lines.push(`| ${t.agent} | ${t.model} | ${t.latency_ms} | ${tk} |`);
+  }
+  lines.push("");
+  lines.push("---");
+  lines.push("");
+  lines.push("_Generated by Hypothesis Hub — Person A engine + Person B retrieval._");
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+function renderStep(step: ProtocolStep): string[] {
+  const out: string[] = [];
+  out.push(`### Step ${step.n}. ${esc(step.title)}  *(${fmt(step.duration_hours)} h)*`);
+  out.push("");
+  out.push(clean(step.description));
+  if (step.citations.length) {
+    out.push("");
+    out.push(`Citations: ${step.citations.map(citationLink).join(" · ")}`);
+  }
+  out.push("");
+  return out;
+}
+
+function renderMaterialRow(n: number, m: Reagent): string {
+  return `| ${n} | ${esc(m.name)} | ${esc(m.supplier)} | [${esc(m.catalog_number)}](${m.catalog_url}) | ${esc(m.qty)} | ${fmt(m.unit_cost_usd)} | ${fmt(m.total_cost_usd)} |`;
+}
+
+function renderBudgetRow(b: BudgetLine): string {
+  const cites = b.citations.map(citationLink).join(" · ");
+  return `| ${b.category} | ${esc(b.description)} | ${fmt(b.cost_usd)} | ${cites} |`;
+}
+
+function renderPhaseRow(p: TimelinePhase): string {
+  const dep = p.depends_on.length ? p.depends_on.join(", ") : "—";
+  return `| ${p.id} | ${esc(p.name)} | ${p.start_week} | ${p.duration_weeks} | ${dep} |`;
+}
+
+function citationLink(c: Citation): string {
+  const label = c.label?.trim() || hostname(c.url);
+  return `[${esc(label)}](${c.url})`;
+}
+
+function hostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "ref";
+  }
+}
+
+function fmt(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+// Compact prose renderer: no paragraph splitting. Cleans AI-tell phrases
+// ("e.g.,", "i.e.,"), auto-links bare URLs, and applies math upgrades.
+// Used for protocol descriptions, validation statistics, overview goals.
+function clean(text: string): string {
+  if (!text) return "";
+  let s = text.replace(/\r\n/g, "\n").replace(/\s*\n+\s*/g, " ").trim();
+
+  // Auto-link bare URLs first (before any other rewriting). Skip ones already
+  // inside a markdown link [text](url).
+  s = autolink(s);
+
+  // Remove AI-tell list-introducers. Order matters: handle parenthesised forms first.
+  s = s
+    .replace(/\(\s*e\.?\s*g\.?,?\s+/gi, "(")
+    .replace(/\(\s*i\.?\s*e\.?,?\s+/gi, "(")
+    .replace(/\be\.?\s*g\.?,?\s+/gi, "")
+    .replace(/\bi\.?\s*e\.?,?\s+/gi, "")
+    .replace(/,?\s*\betc\.?\b/gi, "")
+    // collapse double spaces / orphaned commas left behind
+    .replace(/\(\s*,\s*/g, "(")
+    .replace(/\s+,/g, ",")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
+    .trim();
+
+  // Break long sentences with inline enumerators "(i) ... (ii) ... (iii) ..."
+  // or "1) ... 2) ... 3) ..." into a real markdown list — but only when the
+  // pattern actually enumerates (≥2 markers in the same string).
+  s = breakEnumerators(s);
+
+  // Break "Heading: ... Heading: ... Heading: ..." sentences (common in
+  // Statistics/Validation prose) into a real list when ≥2 such sub-headings
+  // appear in the same line.
+  s = breakHeadings(s);
+
+  return mathify(s);
+}
+
+// Roman numerals up to viii, plus 1)..9) — enough for any realistic LLM list.
+// (^|\s) lets us catch enumerators that start the string too.
+const ENUM_RE = /(?:^|\s)\((i{1,3}|iv|v|vi{0,3}|vii|viii|ix|[1-9])\)\s+/gi;
+const ENUM_RE_PLAIN = /(?:^|\s)([1-9])\)\s+/g;
+
+function breakEnumerators(s: string): string {
+  const parenCount = (s.match(ENUM_RE) || []).length;
+  const plainCount = (s.match(ENUM_RE_PLAIN) || []).length;
+  if (parenCount < 2 && plainCount < 2) return s;
+
+  const re = parenCount >= 2 ? ENUM_RE : ENUM_RE_PLAIN;
+  // Split into [prefix, marker, item, marker, item, ...]
+  const parts = s.split(re);
+  if (parts.length < 5) return s;
+  const prefix = parts[0].trim();
+  const out: string[] = [];
+  if (prefix) {
+    out.push(prefix);
+    out.push(""); // blank line so the list below renders as a list
+  }
+  for (let i = 1; i < parts.length; i += 2) {
+    const marker = parts[i];
+    const item = (parts[i + 1] || "").trim().replace(/[.;]+$/, "");
+    if (item) out.push(`- **(${marker})** ${item}.`);
+  }
+  return out.join("\n");
+}
+
+// Detect inline sub-headings of the form "Capitalized Phrase: …" appearing
+// after a sentence-end. Only triggers when ≥2 such headings exist in the same
+// line, so single uses (e.g. "Sources: x") are left intact. Splits each
+// heading into its own bullet for readability.
+//
+// We process per-line so previously-broken bullets (from breakEnumerators) keep
+// their bullet prefix and just gain sub-bullets when needed.
+function breakHeadings(s: string): string {
+  const lines = s.split("\n");
+  return lines.map(splitLineByHeadings).join("\n");
+}
+
+// Headings: 1–4 Title-Case or all-lowercase words separated by spaces, slashes
+// or hyphens, ending with ":". Must follow ". " or start of line/bullet.
+const HEADING_RE = /(?:^|(?<=[.;]\s))([A-Z][A-Za-z]*(?:[\s/\-][A-Za-z]+){0,3}):\s+/g;
+
+function splitLineByHeadings(line: string): string {
+  // Strip a leading bullet/marker so we work on prose only.
+  const bulletMatch = line.match(/^(\s*-\s+(?:\*\*[^*]+\*\*\s*)?)/);
+  const bullet = bulletMatch ? bulletMatch[1] : "";
+  const body = line.slice(bullet.length);
+
+  // Need at least 2 headings to justify a list.
+  const matches = [...body.matchAll(HEADING_RE)];
+  if (matches.length < 2) return line;
+
+  // Walk through and slice the body at each heading boundary.
+  const items: { label: string; text: string }[] = [];
+  let lastIdx = 0;
+  let preface = "";
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    const start = m.index!;
+    if (i === 0) {
+      preface = body.slice(0, start).trim();
+    } else {
+      const prev = items[items.length - 1];
+      prev.text = body.slice(lastIdx, start).trim().replace(/[.;]+$/, "");
+    }
+    items.push({ label: m[1], text: "" });
+    lastIdx = start + m[0].length;
+  }
+  // Trailing text for the last heading.
+  items[items.length - 1].text = body.slice(lastIdx).trim().replace(/[.;]+$/, "");
+
+  // Reject low-signal splits: every item must have non-trivial body text.
+  if (items.some((it) => it.text.length < 4)) return line;
+
+  // Indent sub-bullets one level under the parent bullet (if any).
+  const subIndent = bullet ? "  " : "";
+  const out: string[] = [];
+  if (preface) out.push(`${bullet}${preface}`);
+  else if (bullet) out.push(bullet.trimEnd());
+  for (const it of items) out.push(`${subIndent}- **${it.label}.** ${it.text}.`);
+  return out.join("\n");
+}
+
+// Wrap any bare http(s) URL with a markdown link to its hostname.
+// Skips URLs already inside markdown links — i.e. preceded by "](".
+function autolink(s: string): string {
+  const URL_RE = /(?<!\]\()\bhttps?:\/\/[^\s<>()\[\]"']+[^\s<>()\[\]"',.;:]/g;
+  return s.replace(URL_RE, (url) => `[${hostname(url)}](${url})`);
+}
+
+// Best-effort math rendering. Two strategies:
+//  1) Pre-existing $...$ / $$...$$ delimiters are left intact (KaTeX/GFM math renders them).
+//  2) Bare ASCII forms like "R^2", "y^2", "H2O", "CO2", "x_i" are upgraded to Unicode
+//     super/subscripts so they render correctly in plain Markdown viewers (no plugin required).
+function mathify(s: string): string {
+  if (!s) return s;
+  // Don't touch already-delimited math.
+  const parts = s.split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+\$)/g);
+  return parts
+    .map((part, i) => (i % 2 === 1 ? part : upgradeAsciiMath(part)))
+    .join("");
+}
+
+const SUPER: Record<string, string> = {
+  "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+  "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+  "+": "⁺", "-": "⁻", "−": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ",
+};
+const SUB: Record<string, string> = {
+  "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+  "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+  "+": "₊", "-": "₋", "=": "₌", "i": "ᵢ", "j": "ⱼ", "n": "ₙ",
+};
+
+function upgradeAsciiMath(s: string): string {
+  // x^123 or x^-2  ->  Unicode superscripts (when every char is mappable)
+  s = s.replace(/\^([+\-−]?[0-9n]+|\([^()]*\))/g, (_, exp) => {
+    const body = exp.startsWith("(") && exp.endsWith(")") ? exp.slice(1, -1) : exp;
+    const mapped = [...body].map((c: string) => SUPER[c] ?? null);
+    return mapped.every((c) => c) ? mapped.join("") : `^${exp}`;
+  });
+  // x_123  ->  Unicode subscripts
+  s = s.replace(/(?<=[A-Za-z])_([0-9]+|i|j|n)\b/g, (_, exp) => {
+    const mapped = [...exp].map((c: string) => SUB[c] ?? null);
+    return mapped.every((c) => c) ? mapped.join("") : `_${exp}`;
+  });
+  // Common chemistry: H2O, CO2, NH3 -> H₂O etc. (digit immediately after capital + optional lowercase)
+  s = s.replace(/\b([A-Z][a-z]?)([0-9]+)\b/g, (_, sym, n) => {
+    const subbed = [...n].map((c: string) => SUB[c] ?? c).join("");
+    return `${sym}${subbed}`;
+  });
+  return s;
+}
+
+function esc(s: string): string {
+  // Apply prose cleaning (autolink + AI-tell removal + math), then escape
+  // table-hostile chars: pipes break columns; newlines become <br/>.
+  return clean(s).replace(/\|/g, "\\|").replace(/\r?\n/g, "<br/>");
+}

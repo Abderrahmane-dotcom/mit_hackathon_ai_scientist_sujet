@@ -12,8 +12,9 @@ import { runTimelineAgent }   from "./agents/timeline.js";
 import { runValidationAgent } from "./agents/validation.js";
 import { consistencyPass }    from "./agents/leadPI.js";
 
-import { mockRetrieval, type RetrievalClient } from "./retrieval/mock.js";
+import { mockRetrieval, type RetrievalClient, type RetrievalResult } from "./retrieval/mock.js";
 import { mockCorrections, type CorrectionsClient } from "./corrections/mock.js";
+import { classifyHypothesis } from "./retrieval/classify.js";
 
 import { PlanSchema, type Plan } from "./shared/types.js";
 
@@ -39,8 +40,8 @@ export async function orchestrate(args: OrchestrateArgs): Promise<Plan> {
   const emit        = args.emit        ?? (() => {});
   const apply       = args.applyCorrections ?? false;
 
-  // 1) Classify domain + experiment type
-  const cls = await retrieval.classify(args.hypothesis);
+  // 1) Classify domain + experiment type (LLM-backed, falls back to heuristic)
+  const cls = await classifyHypothesis(args.hypothesis);
   const domain = cls.domain;
   const experiment_type = args.experiment_type ?? cls.experiment_type;
   emit({ kind: "info", message: `classified: ${domain} / ${experiment_type}` });
@@ -135,6 +136,11 @@ export async function orchestrate(args: OrchestrateArgs): Promise<Plan> {
     },
   };
 
+  // 6a) Pre-PI grounding repair — patch citation gaps using the Tavily URLs we
+  // already paid for. Free (no LLM call), deterministic, and only triggers when
+  // an LLM forgets to paste a URL. Without this the demo dies on Lead PI.
+  groundingRepair(draft, { protocols, suppliers, papers }, emit);
+
   const { plan, report } = consistencyPass(draft);
   for (const f of report.fixed)    emit({ kind: "info",    message: `lead-PI fixed: ${f}` });
   for (const w of report.warnings) emit({ kind: "warning", message: `lead-PI warning: ${w}` });
@@ -142,6 +148,78 @@ export async function orchestrate(args: OrchestrateArgs): Promise<Plan> {
   // Final schema gate — throws loud if anything is still wrong.
   const final = PlanSchema.parse(plan);
   return final;
+}
+
+/**
+ * Deterministic, pre-LeadPI repair using the retrieval block:
+ *  - Protocol steps with no http(s) citation → inject the first protocols URL
+ *    (falls back to papers, then suppliers).
+ *  - Budget missing a 'reagents' line while materials non-empty → synthesize
+ *    one covering materials.total_usd, cited from a material's catalog_url.
+ *  - Budget lines with no http(s) citation → inject a sensible source URL.
+ */
+function groundingRepair(
+  plan: Plan,
+  refs: { protocols: RetrievalResult[]; suppliers: RetrievalResult[]; papers: RetrievalResult[] },
+  emit: (e: SectionEvent) => void
+) {
+  const isUrl = (s: string | undefined) => !!s && /^https?:\/\//.test(s);
+  const fallback =
+    refs.protocols.find((r) => isUrl(r.url)) ??
+    refs.papers.find((r) => isUrl(r.url)) ??
+    refs.suppliers.find((r) => isUrl(r.url));
+
+  // --- protocol citations
+  for (const step of plan.protocol.steps) {
+    const hasUrl = step.citations.some((c) => isUrl(c.url));
+    if (hasUrl) continue;
+    if (!fallback) continue;
+    step.citations = [{ url: fallback.url, label: fallback.title }];
+    emit({ kind: "info", message: `repair: protocol step ${step.n} cited ${fallback.url}` });
+  }
+
+  // --- budget reagents line
+  if (plan.materials.items.length > 0) {
+    const hasReagents = plan.budget.lines.some((l) => l.category === "reagents");
+    if (!hasReagents) {
+      const cite =
+        plan.materials.items.find((m) => isUrl(m.catalog_url))?.catalog_url ??
+        refs.suppliers.find((r) => isUrl(r.url))?.url ??
+        fallback?.url;
+      if (cite) {
+        plan.budget.lines.unshift({
+          category: "reagents",
+          description: `All reagents per materials list (${plan.materials.items.length} item${
+            plan.materials.items.length === 1 ? "" : "s"
+          }).`,
+          cost_usd: plan.materials.total_usd,
+          citations: [{ url: cite, label: "supplier catalog" }],
+        });
+        plan.budget.total_usd = round2(plan.budget.lines.reduce((s, l) => s + l.cost_usd, 0));
+        emit({ kind: "info", message: `repair: synthesized budget.reagents line ($${plan.materials.total_usd})` });
+      }
+    }
+  }
+
+  // --- budget line citations
+  for (const line of plan.budget.lines) {
+    const hasUrl = line.citations.some((c) => isUrl(c.url));
+    if (hasUrl) continue;
+    const cite =
+      line.category === "reagents" || line.category === "consumables"
+        ? refs.suppliers.find((r) => isUrl(r.url))?.url
+        : line.category === "labor" || line.category === "overhead"
+        ? "https://www.bls.gov/oes/current/oes192012.htm"
+        : fallback?.url;
+    if (cite) {
+      line.citations = [{ url: cite, label: `${line.category} reference` }];
+      emit({ kind: "info", message: `repair: budget '${line.category}' cited ${cite}` });
+    }
+  }
+}
+
+function round2(n: number) {
+  return Math.round(n * 100) / 100;
 }
 
 async function timed<T extends { trace: { latency_ms: number } }>(_label: string, p: Promise<T>): Promise<T> {
