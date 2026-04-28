@@ -1,7 +1,7 @@
 
 <div align="center">
   <img src="logo_axiomdesk.png" alt="AI Scientist Logo" width="140" />
-  <h1>🧪 AI Scientist</h1>
+  <h1>🧪 AxiomDesk : AI Scientist</h1>
   <p><em>Science moves at the speed of thought. Experiment planning shouldn't move at the speed of paperwork.</em></p>
   <p><strong>AI-powered copilot for generating executable experiment plans from scientific hypotheses.</strong></p>
 
