@@ -18,6 +18,8 @@
 </div>
 
 ---
+![Demo](demo_app.gif)
+
 
 ## 🚀 Overview
 
